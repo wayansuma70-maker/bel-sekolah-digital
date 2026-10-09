@@ -60,7 +60,17 @@ function tambahHari(iso, n) { const [y, m, d] = iso.split('-').map(Number); cons
 // ---------- Akses data ----------
 const jadwalHari = h => ((S.pub && S.pub.jadwal) || []).filter(j => j.hari === h).sort((a, b) => a.jam < b.jam ? -1 : a.jam > b.jam ? 1 : 0);
 const liburOn = t => ((S.pub && S.pub.libur) || []).find(l => l.tanggal_mulai <= t && t <= l.tanggal_selesai);
+// Nada bawaan: dibuat langsung oleh browser, tanpa unggah file. Pasangan [frekuensi Hz (0 = jeda), detik]
+const NADA_BAWAAN = [
+  { id: '@klasik', nama: 'Bel Klasik 4 Nada', ket: 'Empat nada lembut (nada bawaan awal).', type: 'sine', gain: 0.6, seq: [[659.25, .7], [523.25, .7], [587.33, .7], [392, .7]] },
+  { id: '@chime3', nama: 'Chime 3 Nada', ket: 'Tiga nada naik, cocok untuk bel masuk kelas.', type: 'sine', gain: 0.6, seq: [[523.25, .5], [659.25, .5], [783.99, .9]] },
+  { id: '@dingdong', nama: 'Ding-Dong', ket: 'Dua nada singkat, cocok untuk pergantian jam.', type: 'triangle', gain: 0.7, seq: [[698.46, .6], [523.25, .9]] },
+  { id: '@westminster', nama: 'Lonceng Westminster', ket: 'Melodi lonceng jam yang klasik, cocok untuk istirahat.', type: 'sine', gain: 0.6, seq: [[415.3, .7], [369.99, .7], [329.63, .7], [246.94, 1.3]] },
+  { id: '@elektrik', nama: 'Bel Elektrik', ket: 'Dering cepat yang tegas, cocok untuk bel pulang.', type: 'square', gain: 0.22, seq: [[880, .2], [0, .08], [880, .2], [0, .08], [880, .2], [0, .08], [880, .2], [0, .08], [880, .2], [0, .08], [880, .2]] }
+];
+const isNadaBawaan = id => typeof id === 'string' && id.charAt(0) === '@';
 function suaraNama(id) {
+  if (isNadaBawaan(id)) { const n = NADA_BAWAAN.find(x => x.id === id); if (n) return n.nama; }
   const list = (S.pub && S.pub.suara) || [];
   const s = list.find(x => x.id === id) || list.find(x => x.default === 'ya');
   return s ? s.nama : 'Nada bawaan';
@@ -132,6 +142,7 @@ async function loadBerkas() { S.berkas = await apiGet('getBerkas'); }
 function clearAudioCache() { Object.values(S.audio.urls).forEach(u => { if (u) URL.revokeObjectURL(u); }); S.audio.urls = {}; }
 function b64ToBlob(b64, mime) { const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Blob([u8], { type: mime }); }
 async function getAudioUrl(id) {
+  if (isNadaBawaan(id)) return null; // nada bawaan tidak punya file
   const key = id || 'default';
   if (key in S.audio.urls) return S.audio.urls[key];
   const d = await apiGet('getAudio', id ? { id } : {});
@@ -141,26 +152,33 @@ async function getAudioUrl(id) {
 }
 async function preloadAudio() {
   const np = nowParts(); const ids = new Set(['']);
-  jadwalHari(np.hari).forEach(b => ids.add(b.id_suara || ''));
+  jadwalHari(np.hari).forEach(b => { if (!isNadaBawaan(b.id_suara)) ids.add(b.id_suara || ''); });
   await Promise.all([...ids].map(i => getAudioUrl(i).catch(() => {})));
 }
 function ensureCtx() {
   if (!S.audio.ctx) { const AC = window.AudioContext || window.webkitAudioContext; S.audio.ctx = new AC(); }
   return S.audio.ctx;
 }
-function synthBell() { // nada bawaan bila belum ada file suara
+function playNada(id) {
+  const n = NADA_BAWAAN.find(x => x.id === id) || NADA_BAWAAN[0];
   const ctx = ensureCtx(); if (ctx.state === 'suspended') ctx.resume();
-  const t0 = ctx.currentTime + 0.02;
-  [659.25, 523.25, 587.33, 392.0].forEach((f, i) => {
-    const o = ctx.createOscillator(), g = ctx.createGain(), t = t0 + i * 0.7;
-    o.type = 'sine'; o.frequency.value = f;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, 0.6 * S.audio.volume), t + 0.03);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
-    o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + 0.7);
+  let t = ctx.currentTime + 0.02;
+  const peak = Math.max(0.0002, n.gain * S.audio.volume);
+  n.seq.forEach(([f, d]) => {
+    if (f > 0) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = n.type; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + d * 0.95);
+      o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + d);
+    }
+    t += d;
   });
 }
+function synthBell() { playNada('@klasik'); } // cadangan bila belum ada file suara
 async function playBell(id) {
+  if (isNadaBawaan(id)) { playNada(id); return; }
   let url = null;
   try { url = await getAudioUrl(id); } catch (e) {}
   if (url) { const a = new Audio(url); a.volume = S.audio.volume; await a.play(); return; }
@@ -377,7 +395,9 @@ function adminBody() {
     default: return tabJadwal();
   }
 }
-const suaraOptions = sel => `<option value="">Suara default (${esc(suaraNama(''))})</option>` + ((S.pub.suara) || []).map(s => `<option value="${esc(s.id)}" ${s.id === sel ? 'selected' : ''}>${esc(s.nama)}</option>`).join('');
+const suaraOptions = sel => `<option value="">Suara default (${esc(suaraNama(''))})</option>` +
+  `<optgroup label="Nada bawaan">${NADA_BAWAAN.map(n => `<option value="${n.id}" ${n.id === sel ? 'selected' : ''}>${esc(n.nama)}</option>`).join('')}</optgroup>` +
+  (((S.pub.suara) || []).length ? `<optgroup label="Suara unggahan">${S.pub.suara.map(x => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x.nama)}</option>`).join('')}</optgroup>` : '');
 
 function tabJadwal() {
   const all = S.pub.jadwal || [], f = S.admin.hari, ed = S.admin.edit;
@@ -392,7 +412,7 @@ function tabJadwal() {
         <div class="field"><label class="f" for="jam">Jam (24 jam, HH:MM)</label><input class="inp num" id="jam" name="jam" inputmode="numeric" placeholder="07:30" maxlength="5" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" required value="${esc(ed ? ed.jam : '')}"></div>
         <div class="field"><label class="f" for="ket">Keterangan acara / sesi</label><input class="inp" id="ket" name="keterangan" maxlength="80" placeholder="Pelajaran Ke-1" required value="${esc(ed ? ed.keterangan : '')}"></div>
         <div class="field"><label class="f" for="kat">Kategori</label><select class="inp" id="kat" name="kategori">${Object.keys(KAT_LABEL).map(k => `<option value="${k}" ${ed && ed.kategori === k ? 'selected' : ''}>${KAT_LABEL[k]}</option>`).join('')}</select></div>
-        <div class="field"><label class="f" for="sn">Suara bel</label><div class="row" style="flex-wrap:nowrap"><select class="inp" id="sn" name="id_suara">${suaraOptions(ed ? ed.id_suara : '')}</select><button type="button" class="btn btn-ghost btn-sm" data-act="uji-form" style="flex:none">${ico('play', 14)} Uji</button></div></div>
+        <div class="field"><label class="f" for="sn">Suara bel</label><div class="row" style="flex-wrap:nowrap"><select class="inp" id="sn" name="id_suara">${suaraOptions(ed ? ed.id_suara : '')}</select><button type="button" class="btn btn-ghost btn-sm" data-act="uji-form" style="flex:none">${ico('play', 14)} Uji</button></div><div class="small muted" style="margin-top:6px">Ingin lagu sendiri? Unggah dulu di tab <b>Suara Bel</b>.</div></div>
       </div>
       <div class="row between" style="margin-top:16px"><label class="row" style="gap:10px"><span class="switch"><input type="checkbox" name="aktif" ${!ed || ed.aktif !== 'tidak' ? 'checked' : ''}><i></i></span> Aktifkan jadwal</label>
         <div class="row">${ed ? '<button type="button" class="btn btn-ghost" data-act="batal-edit">Batal</button>' : ''}<button class="btn btn-primary" type="submit">Simpan</button></div></div>
@@ -429,7 +449,10 @@ function tabSuara() {
       <div class="field"><label class="f" for="sj">Nama suara</label><input class="inp" id="sj" name="nama" maxlength="60" placeholder="Nada Masuk Kelas"></div></div>
       <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="btn btn-primary" type="submit">${ico('plus', 16)} Unggah</button></div></form></section>
     <section><h2 class="card-title" style="margin-bottom:10px">Daftar Suara</h2>
-      <div class="list-row"><div class="grow"><div class="tl-name">Nada bawaan (dibuat browser)</div><div class="small muted">Dipakai bila belum ada suara yang diunggah.</div></div><button class="icon-btn" data-act="play-suara" data-id="__synth" aria-label="Putar nada bawaan">${ico('play')}</button></div>
+      <h3 class="small muted" style="margin:6px 0">Nada bawaan (tanpa unggah, langsung bisa dipilih di form jadwal)</h3>
+      ${NADA_BAWAAN.map(n => `<div class="list-row"><div class="grow"><div class="tl-name">${esc(n.nama)}</div><div class="small muted">${esc(n.ket)}</div></div><button class="icon-btn" data-act="play-suara" data-id="${n.id}" aria-label="Putar ${esc(n.nama)}">${ico('play')}</button></div>`).join('')}
+      <h3 class="small muted" style="margin:14px 0 6px">Lagu / suara unggahan Anda</h3>
+      ${list.length ? '' : '<div class="card"><div class="empty">Belum ada suara yang diunggah. Gunakan form “Unggah Suara Bel” di atas.</div></div>'}
       ${list.map(s => `<div class="list-row"><div class="grow"><div class="tl-name">${esc(s.nama)}</div><div class="small muted">${s.default === 'ya' ? '<span class="pill pill-ok">DEFAULT</span>' : `<button class="btn btn-ghost btn-sm" data-act="def-suara" data-id="${esc(s.id)}">Jadikan default</button>`}</div></div>
         <button class="icon-btn" data-act="play-suara" data-id="${esc(s.id)}" aria-label="Putar ${esc(s.nama)}">${ico('play')}</button>
         <button class="icon-btn" data-act="ren-suara" data-id="${esc(s.id)}" aria-label="Ubah nama">${ico('edit')}</button>
